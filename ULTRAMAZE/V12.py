@@ -1,0 +1,414 @@
+import pygame
+import random
+import time
+import sys
+
+# Initialize Pygame
+pygame.init()
+
+# Screen dimensions
+screen_width, screen_height = 1400, 900
+ui_height = 50  # Reserved area at the top for UI
+screen = pygame.display.set_mode((screen_width, screen_height))
+pygame.display.set_caption("Super hard maze game")
+
+# Colors
+WHITE = (255, 255, 255)
+RED = (255, 0, 0)
+BLACK = (0, 0, 0)
+GREEN = (0, 255, 0)
+YELLOW = (255, 255, 0)
+BLUE = (0, 0, 255)
+
+# Player and goal settings
+player_size = 20  # Player size
+goal_size = 20  # Goal size
+player_speed = 2  # Speed at which the player moves
+
+# Other global variables 
+random_square_size = 10 # Make random square smaller than player
+player_safe_zone_radius = 2  # Safe zone around the player
+goal_safe_zone_radius = 1  # Safe zone around the goal
+
+# Flags and counters
+running = True
+game_over = False
+main_menu = True
+player_moving = False 
+level = 1
+start_time = 0
+elapsed_time = 0
+maze = []
+coins_collected = 0  # Count of coins collected
+
+# Maze settings
+cell_size = 40 # Size of each cell in the maze
+maze_width = screen_width // cell_size  # Number of cells horizontally
+maze_height = (screen_height - ui_height) // cell_size  # Number of cells vertically
+
+# Font for UI
+font = pygame.font.SysFont(None, 36)
+
+# Main menu and game over menu text
+main_menu_texts = [
+    "Welcome to ULTRA'S Hard Maze Game!",
+    "Press Space to Start a New Game",
+    "Press Q to Quit",
+    "--------------------",
+    "The goal of the game",
+    "is to reach the goal 100 times.",
+    "Do it in the shortest time possible.",
+    "--------------------",
+    "Created by ULTRAEDGE",
+]
+game_over_menu_texts = [
+    "Game Over!",
+    "Press Space to Start a New Game",
+    "Press M to Return to Main Menu",
+]
+
+# Coin settings
+coin_x, coin_y = None, None  # Coin position
+coin_present = False  # Whether a coin is present on the level
+
+# Barrier settings
+barrier_active = False
+barrier_cost = 5
+barrier_rect = None
+
+# Random square settings
+random_square_target_x, random_square_target_y = None, None
+random_square_x, random_square_y = None, None
+random_square_active = False
+random_square_speed = 1
+
+
+def generate_maze():
+    """Generate a new maze with safe zones around the player and goal."""
+    maze = [[1] * maze_width for _ in range(maze_height)]
+
+    def carve_path(x, y):
+        """Recursive function to carve paths in the maze."""
+        maze[y][x] = 0
+        directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]  # Down, Right, Up, Left
+        random.shuffle(directions)
+        for dx, dy in directions:
+            nx, ny = x + dx * 2, y + dy * 2
+            if 0 <= nx < maze_width and 0 <= ny < maze_height and maze[ny][nx] == 1:
+                maze[ny][nx] = 0
+                maze[ny - dy][nx - dx] = 0
+                carve_path(nx, ny)
+
+    # Start carving from the top-left corner
+    carve_path(1, 1)
+
+    # Create a safe zone around the player's start position
+    player_start_x, player_start_y = 1, 1
+    for y in range(player_start_y - player_safe_zone_radius, player_start_y + player_safe_zone_radius + 1):
+        for x in range(player_start_x - player_safe_zone_radius, player_start_x + player_safe_zone_radius + 1):
+            if 0 <= x < maze_width and 0 <= y < maze_height:
+                maze[y][x] = 0
+
+    # Place the goal in a random safe zone
+    while True:
+        goal_start_x = random.randint(0, maze_width - 1)
+        goal_start_y = random.randint(0, maze_height - 1)
+
+        if maze[goal_start_y][goal_start_x] == 0:
+            for y in range(goal_start_y - goal_safe_zone_radius, goal_start_y + goal_safe_zone_radius + 1):
+                for x in range(goal_start_x - goal_safe_zone_radius, goal_start_x + goal_safe_zone_radius + 1):
+                    if 0 <= x < maze_width and 0 <= y < maze_height:
+                        maze[y][x] = 0
+            break
+
+    return maze, goal_start_x * cell_size, goal_start_y * cell_size
+
+
+def spawn_coin():
+    """Spawn a coin randomly in the maze."""
+    while True:
+        coin_x = random.randint(0, maze_width - 1) * cell_size
+        coin_y = random.randint(0, maze_height - 1) * cell_size + ui_height
+
+        # Ensure the coin does not overlap walls or the goal
+        if maze[(coin_y - ui_height) // cell_size][coin_x // cell_size] == 0 and (coin_x, coin_y) != (goal_x, goal_y):
+            return coin_x, coin_y
+
+
+def draw_text(text, x, y):
+    """Render text on the screen."""
+    text_surface = font.render(text, True, WHITE)
+    screen.blit(text_surface, (x, y))
+
+
+def main_menu_screen():
+    """Display the main menu."""
+    for i, line in enumerate(main_menu_texts):
+        draw_text(line, 50, 100 + 40 * i)  # Updated position: closer to the top-left
+    pygame.display.flip()
+
+
+def game_over_screen():
+    """Display the game over screen."""
+    for i, line in enumerate(game_over_menu_texts):
+        draw_text(line, screen_width // 2 - 150, screen_height // 3 + 50 * i)
+    level_text = font.render(f"Level Reached: {level}", True, WHITE)
+    time_text = font.render(f"Time: {elapsed_time} seconds", True, WHITE)
+    screen.blit(level_text, (screen_width // 2 - 100, screen_height // 3 + 150))
+    screen.blit(time_text, (screen_width // 2 - 100, screen_height // 3 + 200))
+    pygame.display.flip()
+
+
+# random square movement
+def move_random_square():
+    global random_square_x, random_square_y, random_square_target_x, random_square_target_y
+
+    if random_square_target_x is None or random_square_target_y is None:
+        # Ensure target is set if undefined
+        random_square_target_x, random_square_target_y = random_square_x, random_square_y
+
+    # If the square is at its target position, choose a new target
+    if random_square_x == random_square_target_x and random_square_y == random_square_target_y:
+        current_x = random_square_x // cell_size
+        current_y = (random_square_y - ui_height) // cell_size
+
+        directions = [(0, -1), (0, 1), (-1, 0), (1, 0)]  # Up, Down, Left, Right
+        random.shuffle(directions)
+
+        for dx, dy in directions:
+            new_x = current_x + dx
+            new_y = current_y + dy
+
+            # Ensure the new position is within bounds and not a wall
+            if (
+                0 <= new_x < maze_width
+                and 0 <= new_y < maze_height
+                and maze[new_y][new_x] == 0
+            ):
+                random_square_target_x = new_x * cell_size
+                random_square_target_y = new_y * cell_size + ui_height
+                break
+
+    # Gradually move towards the target position
+    if random_square_x < random_square_target_x:
+        random_square_x += random_square_speed
+    elif random_square_x > random_square_target_x:
+        random_square_x -= random_square_speed
+
+    if random_square_y < random_square_target_y:
+        random_square_y += random_square_speed
+    elif random_square_y > random_square_target_y:
+        random_square_y -= random_square_speed
+
+# Main game loop
+while running:
+    screen.fill(BLACK)
+
+    if main_menu:
+        main_menu_screen()
+    elif game_over:
+        game_over_screen()
+    else:
+        # Update player movement
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_w] or keys[pygame.K_UP]:
+            player_y -= player_speed
+        if keys[pygame.K_s] or keys[pygame.K_DOWN]:
+            player_y += player_speed
+        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+            player_x -= player_speed
+        if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+            player_x += player_speed
+        if keys[pygame.K_RSHIFT] or keys[pygame.K_LSHIFT]:
+            player_speed = 3
+        else:
+            player_speed = 2
+
+        
+        # Keep player within bounds
+        player_x = max(0, min(player_x, screen_width - player_size))
+        player_y = max(ui_height, min(player_y, screen_height - player_size))
+
+        # Check for collision with walls (adjust the player hitbox)
+        player_hitbox = pygame.Rect(player_x, player_y, player_size, player_size)
+        if maze[(player_y - ui_height) // cell_size][player_x // cell_size] == 1:
+            game_over = True
+            elapsed_time = int(time.time() - start_time)
+
+
+        # Check if the player reaches the goal
+        if (
+            player_x < goal_x + goal_size
+            and player_x + player_size > goal_x
+            and player_y < goal_y + goal_size
+            and player_y + player_size > goal_y
+        ):
+            # Move to the next level
+            level += 1  # level count goes up.
+            # cell_size -= 1 # Size of each cell in the maze goes dowmn
+            player_speed = 2  # Reset player speed
+            player_x, player_y = cell_size, ui_height + cell_size  # Reset player position
+            maze, goal_x, goal_y = generate_maze()  # Generate a new maze
+            goal_y += ui_height  # Adjust for the UI height
+
+            # Spawn coin for levels 6-10
+            if 6 <= level <= 10:
+                coin_x, coin_y = spawn_coin()
+                coin_present = True
+            else:
+                coin_present = False
+
+            # Activate barrier on level 13
+            if level == 13:
+                barrier_active = True
+                barrier_rect = pygame.Rect(goal_x - 10, goal_y - 10, goal_size + 20, goal_size + 20)
+
+            # Activate random square on level 14
+            if level >= 14:
+                random_square_active = True
+                random_square_x, random_square_y = goal_x, goal_y
+                random_square_target_x, random_square_target_y = goal_x, goal_y  # Initialize target position
+
+
+        # Check if the player collects a coin
+        if coin_present and (
+            player_x < coin_x + player_size
+            and player_x + player_size > coin_x
+            and player_y < coin_y + player_size
+            and player_y + player_size > coin_y
+        ):
+            coins_collected += 1
+            coin_present = False
+
+        # Check barrier interaction
+        if barrier_active and barrier_rect.colliderect((player_x, player_y, player_size, player_size)):
+            if coins_collected >= barrier_cost:
+                coins_collected -= barrier_cost
+                barrier_active = False
+            else:
+                game_over = True
+
+        # Draw maze
+        for y in range(maze_height):
+            for x in range(maze_width):
+                if maze[y][x] == 1:
+                    pygame.draw.rect(screen, WHITE, (x * cell_size, y * cell_size + ui_height, cell_size, cell_size))
+
+        # Draw player and goal
+        pygame.draw.rect(screen, GREEN, (player_x, player_y, player_size, player_size))
+        pygame.draw.rect(screen, RED, (goal_x, goal_y, goal_size, goal_size))
+
+        # Draw barrier
+        if barrier_active:
+            pygame.draw.rect(screen, BLUE, barrier_rect, 3)  # Thicker barrier
+
+        # Move random square after level 14
+        if level >= 14:
+            random_square_active = True
+             
+            # Draw random square
+            pygame.draw.rect(screen, WHITE, (random_square_x, random_square_y, player_size, player_size))
+            move_random_square()
+
+        # Draw random square
+        if random_square_active:
+            random_square_size = player_size // 1 # Make it half the size of the player
+            pygame.draw.rect(screen, WHITE, (random_square_x, random_square_y, random_square_size, random_square_size))
+
+        # Draw coin
+        if coin_present:
+            pygame.draw.circle(screen, YELLOW, (coin_x + player_size // 2, coin_y + player_size // 2), player_size // 2)
+
+        # Update and display elapsed time
+        elapsed_time = int(time.time() - start_time)
+        draw_text(f"Level: {level}", 10, 10)
+        draw_text(f"Time: {elapsed_time} seconds", 10, 30)
+        draw_text(f"Coins: {coins_collected}", screen_width - 150, 10)  # Display coin count
+
+        # Display level-specific messages
+        if level == 1:
+            draw_text("Move to the red square.", screen_width // 2 - 150, 10)
+        elif level == 2:
+            draw_text("The clock is ticking.", screen_width // 2 - 150, 10)
+        elif level == 3:
+            draw_text("There is a special surprise at level 6.", screen_width // 2 - 150, 10)
+        elif level == 4:
+            draw_text("It's just a simple maze game.", screen_width // 2 - 150, 10)
+        elif level == 5:
+            draw_text("Just keep going.", screen_width // 2 - 150, 10)
+        elif level == 6:
+            draw_text("There it is!", screen_width // 2 - 150, 10)
+        elif level == 7:
+            draw_text("You gotta get the coins! Right?", screen_width // 2 - 150, 10)
+        elif level == 8:
+            draw_text("I can't remeber... are the coins optional?", screen_width // 2 - 150, 10)
+        elif level == 9:
+            draw_text("I guess it is up to you.", screen_width // 2 - 150, 10)
+        elif level == 10:
+            draw_text("Hope you got all the coins...", screen_width // 2 - 150, 10)
+        elif level == 11:
+            draw_text("You greedy little gamer.", screen_width // 2 - 150, 10)
+        elif level == 12:
+            draw_text("wow, Level 12. Look at you go.", screen_width // 2 - 150, 10)
+        elif level == 13:
+            draw_text("This is an unlucky level.", screen_width // 2 - 150, 10)
+        elif level == 14:
+            draw_text("The game gets really hard on level 25.", screen_width // 2 - 150, 10)
+        elif level == 15:
+            draw_text("I bet you can go faster...", screen_width // 2 - 150, 10)
+        elif level == 16:
+            draw_text("The game ends at Level 100 but you wont make it past Level 50.", screen_width // 2 - 150, 10)
+        elif level == 17:
+            draw_text("Can you feel the walls getting smaller?", screen_width // 2 - 150, 10)
+        elif level == 18:
+            draw_text("Hey! You know you can press SHIFT to go fatser right?", screen_width // 2 - 150, 10)
+        elif level == 19:
+            draw_text("Can you really make it to the end?", screen_width // 2 - 150, 10)
+        elif level == 20:
+            draw_text("The game should be getting harder now.", screen_width // 2 - 150, 10)
+        # Draw barrier if active
+        if level >= 13 and barrier_present:
+            pygame.draw.rect(screen, WHITE, (goal_x - barrier_size, goal_y - barrier_size, 
+                                             goal_size + 2 * barrier_size, goal_size + 2 * barrier_size))
+
+    # Event handling
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        elif event.type == pygame.KEYDOWN:
+            if main_menu and event.key == pygame.K_SPACE:
+                main_menu = False
+                start_time = time.time()
+                level = 1
+                player_speed = 2
+                player_x, player_y = cell_size, ui_height + cell_size
+                maze, goal_x, goal_y = generate_maze()
+                goal_y += ui_height  # Adjust for UI height
+                coins_collected = 0  # Reset coin count
+                coin_present = False
+                barrier_present = False
+                random_square_x, random_square_y = goal_x, goal_y
+            elif game_over and event.key == pygame.K_SPACE:
+                game_over = False
+                start_time = time.time()
+                level = 1
+                cell_size = 40 
+                player_speed = 2
+                player_x, player_y = cell_size, ui_height + cell_size
+                maze, goal_x, goal_y = generate_maze()
+                goal_y += ui_height  # Adjust for UI height
+                coins_collected = 0  # Reset coin count
+                coin_present = False
+                random_square_active = False
+                barrier_present = False
+                random_square_x, random_square_y = goal_x, goal_y
+            elif game_over and event.key == pygame.K_m:
+                game_over = False
+                main_menu = True
+
+    # Refresh display
+    pygame.display.flip()
+    pygame.time.Clock().tick(60)
+
+pygame.quit()
+sys.exit()

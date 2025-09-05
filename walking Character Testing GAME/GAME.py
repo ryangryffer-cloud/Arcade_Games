@@ -1,16 +1,21 @@
 """
-One-file Pygame game + improved character generator (detailed, connected head/body, vertical arms).
+One-file Pygame game + improved character generator + enemies + HP system.
+
 Features:
 - Main Menu: Start Game, Options, Quit
-- Loading Screen with green progress bar while generating a detailed sprite (head bobs less than body)
-- Auto-saves each generated character with a unique filename (timestamp + id) in ./characters/
-- Options Menu: Back, Select Character
-- Select Character screen: shows previews of previous characters; click to start using that sprite
+- Loading Screen with green progress bar while generating a detailed sprite
+- Auto-saves each generated character with a unique filename in ./characters/
+- Options Menu: Back, Select Character (shows previews)
 - In-Game: WASD movement, Esc to pause (Resume, Quit to Main Menu)
+- HP system: player starts with 3 hearts
+- Small slow-moving red dots (enemies) bounce; touching them costs a heart
+- Rare heart pickups can spawn to restore 1 heart (up to a cap)
+- Invulnerability window after being hit to avoid immediate repeated damage
+
 Requirements:
     pip install pygame pillow
 Run:
-    python game_all_in_one.py
+    python game_with_enemies.py
 """
 
 import os, sys, math, time, uuid, random, datetime
@@ -25,7 +30,7 @@ ASSETS_DIR = "characters"
 SHEET_COLS, SHEET_ROWS = 3, 4
 BASE_SIZE = 16
 SCALE = 8
-MOVE_SPEED = 4
+MOVE_SPEED = 180  # pixels per second
 FONT_NAME = None
 BG_COLOR = (30, 30, 40)
 UI_ACCENT = (80, 200, 120)
@@ -35,6 +40,17 @@ BTN_TEXT = (230, 235, 240)
 PANEL_BG = (20, 22, 28)
 
 DIR_DOWN, DIR_LEFT, DIR_RIGHT, DIR_UP = 0, 1, 2, 3
+
+# Gameplay enemy/pickup rates (tune for "rare")
+ENEMY_SPAWN_PER_SECOND = 0.04    # approx one enemy every 25 sec on average
+HEART_SPAWN_PER_SECOND = 0.02    # very rare heart spawn (approx 1 every 50s)
+ENEMY_MIN_SPEED = 20             # px/sec (slow)
+ENEMY_MAX_SPEED = 60             # px/sec
+ENEMY_RADIUS = 10                # px
+HEART_RADIUS = 10                # px
+INVULN_MS = 1000                 # invulnerability duration after hit (1 second)
+STARTING_HEARTS = 3
+MAX_HEARTS = 5
 
 # ----------------------------- UTILITIES -------------------------------
 def ensure_dirs():
@@ -112,7 +128,7 @@ def make_detailed_base(size=BASE_SIZE, seed=None, symmetric=True):
 
     # HEAD placement moved down so it sits on torso:
     head_top = 2
-    head_bottom = 7  # exclusive bottom y coordinate (0..head_bottom-1 is head)
+    head_bottom = 7  # exclusive bottom y coordinate
     head_r = 3
     cx = w//2
     cy = head_top + (head_bottom - head_top)//2
@@ -205,7 +221,6 @@ def make_detailed_base(size=BASE_SIZE, seed=None, symmetric=True):
                 # shading: right half slightly darker
                 if x > w//2:
                     r,g,b,a = px[x,y]
-                    # preserve tuple length
                     px[x,y] = darker((r,g,b), 0.85) + (a,)
                 # outline where touching transparent
                 for dx,dy in ((1,0),(-1,0),(0,1),(0,-1)):
@@ -229,20 +244,17 @@ def nudge(img, dx=0, dy=0):
 def make_walk_sheet(base_img):
     w,h = base_img.size
     # We'll split head and body so head moves less than body.
-    # Define head region based on our base design: head rows 0..6 (height 7)
     head_h = 7
     head = base_img.crop((0, 0, w, head_h))
     body = base_img.crop((0, head_h, w, h))
     sheet = Image.new("RGBA", (w * SHEET_COLS, h * SHEET_ROWS), (0,0,0,0))
 
-    # body offsets (more movement), for three frames: step left, idle, step right
     body_offsets = [-1, 0, 1]
     for row in range(SHEET_ROWS):
         for col in range(SHEET_COLS):
             b_ofs = body_offsets[col % len(body_offsets)]
             h_ofs = int(round(b_ofs * 0.35))  # head moves less
             frame = Image.new("RGBA", (w, h), (0,0,0,0))
-            # paste head and body with offsets
             frame.paste(head, (0, max(0, 0 + h_ofs)), head)
             frame.paste(body, (0, max(0, head_h + b_ofs)), body)
             sheet.paste(frame, (col * w, row * h))
@@ -300,6 +312,45 @@ STATE_SELECT = "select"
 STATE_LOADING = "loading"
 STATE_PLAY = "play"
 STATE_PAUSE = "pause"
+STATE_GAMEOVER = "gameover"
+
+class Enemy:
+    def __init__(self, x, y, vx, vy, radius=ENEMY_RADIUS):
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+        self.r = radius
+    def update(self, dt):
+        # dt in milliseconds
+        self.x += self.vx * (dt / 1000.0)
+        self.y += self.vy * (dt / 1000.0)
+        # bounce off edges
+        if self.x - self.r < 0:
+            self.x = self.r
+            self.vx *= -1
+        if self.x + self.r > SCREEN_W:
+            self.x = SCREEN_W - self.r
+            self.vx *= -1
+        if self.y - self.r < 0:
+            self.y = self.r
+            self.vy *= -1
+        if self.y + self.r > SCREEN_H:
+            self.y = SCREEN_H - self.r
+            self.vy *= -1
+    def draw(self, surf):
+        pygame.draw.circle(surf, (200,30,30), (int(self.x), int(self.y)), self.r)
+        pygame.draw.circle(surf, (120,0,0), (int(self.x), int(self.y)), self.r, 2)
+
+class HeartPickup:
+    def __init__(self, x, y, r=HEART_RADIUS):
+        self.x = x
+        self.y = y
+        self.r = r
+    def draw(self, surf, font):
+        # draw small heart glyph centered
+        txt = font.render("♥", True, (220,60,90))
+        surf.blit(txt, txt.get_rect(center=(int(self.x), int(self.y))))
 
 class Game:
     def __init__(self):
@@ -321,6 +372,11 @@ class Game:
         self.anim_idx = 1
         self.anim_timer = 0
         self.current_character = None
+        self.player_hp = STARTING_HEARTS
+        self.max_hp = max(STARTING_HEARTS, MAX_HEARTS)
+        self.invuln_timer = 0
+        self.enemies = []
+        self.heart_pickups = []
         ensure_dirs()
         self.build_main_menu()
 
@@ -357,12 +413,11 @@ class Game:
         self.loading_text = "Generating character..."
         def progress_cb(step, total):
             self.loading_progress = step/total
-            # draw interim visuals so the user sees progress
             self.draw_loading()
             pygame.display.flip()
         self.current_character = generate_and_save_character(progress_cb)
         self.load_sheet(self.current_character["sheet"])
-        self.reset_player()
+        self.reset_player(full_reset=True)
         self.state = STATE_PLAY
 
     def load_sheet(self, sheet_path):
@@ -378,16 +433,23 @@ class Game:
                 row_frames.append(img.subsurface(rect))
             self.frames.append(row_frames)
 
-    def reset_player(self):
+    def reset_player(self, full_reset=False):
         self.player_x = SCREEN_W//2
         self.player_y = SCREEN_H//2
         self.direction = DIR_DOWN
         self.anim_idx = 1
         self.anim_timer = 0
+        if full_reset:
+            self.player_hp = STARTING_HEARTS
+            self.max_hp = MAX_HEARTS
+            self.invuln_timer = 0
+            self.enemies = []
+            self.heart_pickups = []
 
     def quit_game(self):
         self.running = False
 
+    # ---------------- Drawing helpers ----------------
     def draw_header(self, title):
         pygame.draw.rect(self.screen, PANEL_BG, (0,0,SCREEN_W,90))
         label = self.font.render(title, True, BTN_TEXT)
@@ -452,6 +514,15 @@ class Game:
             self.screen.blit(name_text, name_text.get_rect(center=(x+thumb_w//2, y+thumb_h+18)))
             self.select_click_targets.append((card, item))
 
+    def draw_hud(self):
+        # draw hearts at top-left using glyphs
+        hearts_text = " ".join(["♥" for _ in range(self.player_hp)])
+        hearts_surf = self.font_small.render(hearts_text, True, (220,60,90))
+        self.screen.blit(hearts_surf, (20, 20))
+        # show max hearts small
+        max_surf = self.font_small.render(f"/{self.max_hp}", True, BTN_TEXT)
+        self.screen.blit(max_surf, (20 + hearts_surf.get_width() + 8, 20))
+
     def draw_play(self):
         self.screen.fill((50,50,60))
         for i in range(0, SCREEN_W, 40):
@@ -459,11 +530,28 @@ class Game:
         for j in range(0, SCREEN_H, 40):
             pygame.draw.line(self.screen, (60,60,75), (0,j),(SCREEN_W,j))
 
-        if self.frames:
-            frame = self.frames[self.direction][self.anim_idx]
-            rect = frame.get_rect(center=(self.player_x, self.player_y))
-            self.screen.blit(frame, rect)
+        # draw enemies
+        for e in self.enemies:
+            e.draw(self.screen)
 
+        # draw heart pickups
+        for hp in self.heart_pickups:
+            hp.draw(self.screen, self.font_small)
+
+        # draw player (with invuln blink)
+        if self.frames:
+            now = pygame.time.get_ticks()
+            show_player = True
+            if self.invuln_timer > 0:
+                # blink: toggle visibility every 120ms
+                if (now // 120) % 2 == 0:
+                    show_player = False
+            if show_player:
+                frame = self.frames[self.direction][self.anim_idx]
+                rect = frame.get_rect(center=(int(self.player_x), int(self.player_y)))
+                self.screen.blit(frame, rect)
+
+        self.draw_hud()
         hud = self.font_small.render("WASD to move  •  Esc to pause", True, (220,220,230))
         self.screen.blit(hud, (20, SCREEN_H-36))
 
@@ -484,12 +572,45 @@ class Game:
             b.hover = b.rect.collidepoint(pygame.mouse.get_pos())
             b.draw(self.screen, self.font)
 
+    def draw_gameover(self):
+        self.screen.fill((20,20,30))
+        txt = self.font.render("You Died", True, (220,60,60))
+        self.screen.blit(txt, txt.get_rect(center=(SCREEN_W//2, SCREEN_H//2 - 40)))
+        sub = self.font_small.render("Press Enter to go to Main Menu", True, BTN_TEXT)
+        self.screen.blit(sub, sub.get_rect(center=(SCREEN_W//2, SCREEN_H//2 + 16)))
+
+    # ---------------- Actions ----------------
     def resume_game(self):
         self.state = STATE_PLAY
 
     def quit_to_main(self):
         self.build_main_menu()
 
+    def spawn_enemy(self):
+        # spawn away from player (min distance)
+        min_dist = 120
+        for _ in range(40):
+            x = random.uniform(ENEMY_RADIUS, SCREEN_W - ENEMY_RADIUS)
+            y = random.uniform(ENEMY_RADIUS, SCREEN_H - ENEMY_RADIUS)
+            if math.hypot(x - self.player_x, y - self.player_y) >= min_dist:
+                break
+        angle = random.uniform(0, 2*math.pi)
+        speed = random.uniform(ENEMY_MIN_SPEED, ENEMY_MAX_SPEED)
+        vx = math.cos(angle) * speed
+        vy = math.sin(angle) * speed
+        self.enemies.append(Enemy(x, y, vx, vy, ENEMY_RADIUS))
+
+    def spawn_heart_pickup(self):
+        # spawn away from player
+        min_dist = 120
+        for _ in range(40):
+            x = random.uniform(HEART_RADIUS, SCREEN_W - HEART_RADIUS)
+            y = random.uniform(HEART_RADIUS, SCREEN_H - HEART_RADIUS)
+            if math.hypot(x - self.player_x, y - self.player_y) >= min_dist:
+                break
+        self.heart_pickups.append(HeartPickup(x, y, HEART_RADIUS))
+
+    # ---------------- Event handling ----------------
     def handle_events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -506,7 +627,7 @@ class Game:
                         if rect.collidepoint(pos):
                             self.current_character = item
                             self.load_sheet(item["sheet"])
-                            self.reset_player()
+                            self.reset_player(full_reset=True)
                             self.state = STATE_PLAY
                             return
                 elif event.type == pygame.MOUSEWHEEL:
@@ -518,23 +639,33 @@ class Game:
             elif self.state == STATE_PLAY:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     self.state = STATE_PAUSE
+            elif self.state == STATE_GAMEOVER:
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN:
+                    self.build_main_menu()
 
             if event.type == pygame.MOUSEMOTION:
                 if self.state in (STATE_MAIN, STATE_OPTIONS):
                     for b in self.buttons:
                         b.hover = b.rect.collidepoint(event.pos)
 
+    # ---------------- Update loop ----------------
     def update_play(self, dt):
+        # dt in milliseconds
         keys = pygame.key.get_pressed()
         moving = False
+        speed = MOVE_SPEED
+        dx = dy = 0.0
         if keys[pygame.K_w]:
-            self.player_y -= MOVE_SPEED; self.direction = DIR_UP; moving = True
+            dy -= speed * (dt/1000.0); self.direction = DIR_UP; moving = True
         if keys[pygame.K_s]:
-            self.player_y += MOVE_SPEED; self.direction = DIR_DOWN; moving = True
+            dy += speed * (dt/1000.0); self.direction = DIR_DOWN; moving = True
         if keys[pygame.K_a]:
-            self.player_x -= MOVE_SPEED; self.direction = DIR_LEFT; moving = True
+            dx -= speed * (dt/1000.0); self.direction = DIR_LEFT; moving = True
         if keys[pygame.K_d]:
-            self.player_x += MOVE_SPEED; self.direction = DIR_RIGHT; moving = True
+            dx += speed * (dt/1000.0); self.direction = DIR_RIGHT; moving = True
+
+        self.player_x += dx
+        self.player_y += dy
 
         self.player_x = max(0, min(SCREEN_W, self.player_x))
         self.player_y = max(0, min(SCREEN_H, self.player_y))
@@ -547,9 +678,52 @@ class Game:
         else:
             self.anim_idx = 1
 
-        if keys[pygame.K_ESCAPE]:
-            self.state = STATE_PAUSE
+        # invulnerability countdown
+        if self.invuln_timer > 0:
+            self.invuln_timer = max(0, self.invuln_timer - dt)
 
+        # spawn enemies rarely
+        if random.random() < ENEMY_SPAWN_PER_SECOND * (dt / 1000.0):
+            self.spawn_enemy()
+
+        # spawn heart pickups very rarely
+        if random.random() < HEART_SPAWN_PER_SECOND * (dt / 1000.0):
+            # only spawn if player not at max
+            if self.player_hp < self.max_hp:
+                self.spawn_heart_pickup()
+
+        # update enemies
+        for e in list(self.enemies):
+            e.update(dt)
+            # collision with player (circular approx)
+            pr = max(self.frame_w, self.frame_h) * 0.35 if self.frame_w else 12
+            dist = math.hypot(e.x - self.player_x, e.y - self.player_y)
+            if dist <= (e.r + pr):
+                if self.invuln_timer <= 0:
+                    self.player_hp -= 1
+                    self.invuln_timer = INVULN_MS
+                    # remove this enemy on hit to avoid repeat hits
+                    try:
+                        self.enemies.remove(e)
+                    except ValueError:
+                        pass
+                    if self.player_hp <= 0:
+                        self.state = STATE_GAMEOVER
+                        return
+
+        # update heart pickup pickups & collision
+        for hp in list(self.heart_pickups):
+            dist = math.hypot(hp.x - self.player_x, hp.y - self.player_y)
+            pr = max(self.frame_w, self.frame_h) * 0.35 if self.frame_w else 12
+            if dist <= (hp.r + pr):
+                if self.player_hp < self.max_hp:
+                    self.player_hp += 1
+                try:
+                    self.heart_pickups.remove(hp)
+                except ValueError:
+                    pass
+
+    # ---------------- Main Loop ----------------
     def run(self):
         while self.running:
             dt = self.clock.tick(FPS)
@@ -567,8 +741,12 @@ class Game:
                 self.draw_play()
             elif self.state == STATE_PAUSE:
                 self.draw_pause()
+            elif self.state == STATE_GAMEOVER:
+                self.draw_gameover()
             pygame.display.flip()
-        pygame.quit(); sys.exit()
+        pygame.quit()
+        sys.exit()
 
+# ----------------------------- ENTRY -----------------------------------
 if __name__ == "__main__":
     Game().run()

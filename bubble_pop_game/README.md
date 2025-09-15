@@ -1,0 +1,1 @@
+# Bubble Pop Game (Week 1)\n\nRun `python generate_assets.py` inside this folder to create the assets, then run `python main.py` to start the app (requires kivy).\n
